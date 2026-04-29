@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <versionDescription>
   <product descVersion="1" name="EarShield">
-    <latestVersion>600</latestVersion>
-    <latestVersionString>6.0.0</latestVersionString>
+    <latestVersion>601</latestVersion>
+    <latestVersionString>6.0.1</latestVersionString>
     <latestDownload>
-      <url>https://github.com/gamebaiters/EarShield/releases/download/v6.0.0/EarShield_6.0.0.ts3_plugin</url>
+      <url>https://github.com/gamebaiters/EarShield/releases/download/v6.0.1/EarShield_6.0.1.ts3_plugin</url>
     </latestDownload>
     <featureUrl>https://raw.githubusercontent.com/gamebaiters/EarShield/earshield/release-notes.txt</featureUrl>
   </product>

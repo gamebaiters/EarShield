@@ -10,6 +10,7 @@
 #include <QPushButton>
 #include <QUrl>
 #include <QTimer>
+#include <QEventLoop>
 
 #define EARSHIELD_FEED_URL "https://raw.githubusercontent.com/gamebaiters/EarShield/earshield/version.xml"
 

@@ -1,4 +1,4 @@
-EarShield 6.0.0
+EarShield 6.0.1
 ================
 
 Highlights

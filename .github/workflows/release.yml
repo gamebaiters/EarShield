@@ -22,7 +22,7 @@ jobs:
           host: windows
           target: desktop
           arch: win64_msvc2019_64
-          modules: ''
+          cache: true
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -30,15 +30,14 @@ jobs:
           arch: x64
 
       - name: Configure
-        shell: cmd
+        shell: pwsh
         run: |
-          cmake -B build -G "NMake Makefiles" ^
-              -DCMAKE_BUILD_TYPE=%BUILD_TYPE% ^
-              -DCMAKE_PREFIX_PATH="%QT_ROOT_DIR%"
+          cmake -G "NMake Makefiles" -B build `
+              -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
 
       - name: Build
-        shell: cmd
-        run: cmake --build build --config %BUILD_TYPE%
+        shell: pwsh
+        run: cmake --build build --config ${{ env.BUILD_TYPE }}
 
       - name: Stage artifact
         shell: bash
@@ -82,30 +81,82 @@ jobs:
           path: stage/plugins/
           if-no-files-found: error
 
+  # ---------------- macOS x86_64 ----------------
+  # Self-hosted runner on a personal Apple Silicon Mac. TS3 on macOS is
+  # x86_64-only, so we link against x86_64 Qt5 from an Intel Homebrew tree
+  # at /usr/local invoked through Rosetta 2.
+  #
+  # ONE-TIME SETUP REQUIRED ON THE MAC (cannot run from CI - needs sudo):
+  #   1. sudo softwareupdate --install-rosetta --agree-to-license
+  #   2. xcode-select --install                     # if not already
+  #   3. arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  #   4. arch -x86_64 /usr/local/bin/brew install qt@5
   build-macos:
-    runs-on: macos-13
+    runs-on: self-hosted
     env:
-      MACOSX_DEPLOYMENT_TARGET: '10.13'
+      INTEL_BREW: /usr/local/bin/brew
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Qt5 + tools (Intel runner)
+      - name: Verify Rosetta + Intel Homebrew prerequisites
         run: |
-          brew update || true
-          brew install qt@5
-          echo "$(brew --prefix qt@5)/bin" >> "$GITHUB_PATH"
+          if ! arch -x86_64 /usr/bin/uname -m >/dev/null 2>&1; then
+              cat <<'EOF' >&2
+          ERROR: Rosetta 2 is not installed on this runner.
+          Run ONCE on the Mac (interactive sudo, can't run from CI):
+              sudo softwareupdate --install-rosetta --agree-to-license
+          EOF
+              exit 1
+          fi
+          arch -x86_64 /usr/bin/uname -m
+          if [ ! -x "$INTEL_BREW" ]; then
+              cat <<'EOF' >&2
+          ERROR: Intel Homebrew is not installed at /usr/local.
+          Run ONCE on the Mac (interactive sudo, can't run from CI):
+              arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+              arch -x86_64 /usr/local/bin/brew install qt@5
+          EOF
+              exit 1
+          fi
+          arch -x86_64 "$INTEL_BREW" --version
+
+      - name: Update Qt5 via Intel Homebrew (no sudo)
+        run: |
+          arch -x86_64 "$INTEL_BREW" update || true
+          arch -x86_64 "$INTEL_BREW" install qt@5 2>&1 | tail -20 || true
+          arch -x86_64 "$INTEL_BREW" upgrade qt@5 2>&1 | tail -20 || true
+          echo "/usr/local/opt/qt@5/bin" >> "$GITHUB_PATH"
+
+      - name: Sanity-check arch of dependencies
+        run: |
+          file /usr/local/opt/qt@5/lib/QtCore.framework/QtCore | tee /tmp/arch.log
+          if grep -E "arm64" /tmp/arch.log; then
+              echo "Dependencies are arm64 - link will fail. Aborting." >&2
+              exit 1
+          fi
 
       - name: Configure (x86_64)
         run: |
           cmake -B build \
               -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
               -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-              -DCMAKE_PREFIX_PATH="$(brew --prefix qt@5)"
+              -DCMAKE_PREFIX_PATH=/usr/local/opt/qt@5
 
       - name: Build
         run: cmake --build build -j"$(sysctl -n hw.ncpu)"
 
-      - name: Stage artifact
+      - name: install_name_tool Qt rpath fixups
+        run: |
+          DYLIB="$(find build -name 'libearshield_mac.dylib' | head -1)"
+          if [ -z "$DYLIB" ]; then
+              echo "dylib not found"; ls -la build; exit 1
+          fi
+          for q in Core Widgets Gui Network; do
+              install_name_tool -change "libQt5${q}.dylib" "@rpath/libQt5${q}.dylib" "$DYLIB" || true
+              install_name_tool -change "@rpath/Qt${q}.framework/Versions/5/Qt${q}" "@rpath/libQt5${q}.dylib" "$DYLIB" || true
+          done
+
+      - name: Stage macOS artifact
         run: |
           mkdir -p stage/plugins
           DYLIB="$(find build -name 'libearshield_mac.dylib' | head -1)"
