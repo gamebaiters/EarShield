@@ -145,7 +145,7 @@ jobs:
       - name: Build
         run: cmake --build build -j"$(sysctl -n hw.ncpu)"
 
-      - name: install_name_tool Qt rpath fixups
+      - name: Rewrite plugin dylib install names + add rpath
         run: |
           DYLIB="$(find build -name 'libearshield_mac.dylib' | head -1)"
           if [ -z "$DYLIB" ]; then
@@ -153,10 +153,8 @@ jobs:
           fi
           QT_PREFIX="$(/usr/local/bin/brew --prefix qt@5)"
           echo "Brew Qt prefix: $QT_PREFIX"
-          echo "--- before ---"
+          echo "--- plugin dylib BEFORE ---"
           otool -L "$DYLIB"
-          # Rewrite absolute Brew paths to @rpath so TS3's bundled Qt
-          # frameworks at TeamSpeak\ 3.app/Contents/Frameworks/ resolve.
           for q in Core Widgets Gui Network; do
               install_name_tool -change \
                   "${QT_PREFIX}/lib/Qt${q}.framework/Versions/5/Qt${q}" \
@@ -165,24 +163,72 @@ jobs:
                   "/usr/local/opt/qt@5/lib/Qt${q}.framework/Versions/5/Qt${q}" \
                   "@rpath/Qt${q}.framework/Versions/5/Qt${q}" "$DYLIB" || true
           done
-          # Add Frameworks rpaths TS3 loads from on macOS so the @rpath
-          # references above resolve regardless of where the user has
-          # installed TeamSpeak 3.app.
-          install_name_tool -add_rpath "@loader_path/../Frameworks" "$DYLIB" 2>/dev/null || true
-          install_name_tool -add_rpath "@executable_path/../Frameworks" "$DYLIB" 2>/dev/null || true
-          echo "--- after ---"
+          # Plugin loads its bundled Qt frameworks from plugins/Frameworks/
+          # next to the dylib. TS3 itself does not ship the Qt frameworks
+          # the plugin depends on, so we ship our own copies.
+          install_name_tool -add_rpath "@loader_path/Frameworks" "$DYLIB" 2>/dev/null || true
+          echo "--- plugin dylib AFTER ---"
           otool -L "$DYLIB"
-          # Fail loudly if any /usr/local/ absolute references remain
           if otool -L "$DYLIB" | grep -E '/usr/local/.*Qt[A-Za-z]+\.framework' >/dev/null; then
               echo "ERROR: dylib still has hardcoded Qt absolute paths"
               exit 1
           fi
 
-      - name: Stage macOS artifact
+      - name: Stage macOS artifact + bundle Qt frameworks
         run: |
-          mkdir -p stage/plugins
+          set -e
+          mkdir -p stage/plugins/Frameworks
           DYLIB="$(find build -name 'libearshield_mac.dylib' | head -1)"
           cp "$DYLIB" stage/plugins/libearshield_mac.dylib
+
+          QT_PREFIX="$(/usr/local/bin/brew --prefix qt@5)"
+          QT_FWS="Core Gui Network Widgets"
+
+          # Copy each Qt framework into stage/plugins/Frameworks, stripped
+          # of headers / debug / prl files to keep the package small.
+          for q in $QT_FWS; do
+              FW="Qt${q}.framework"
+              SRC="${QT_PREFIX}/lib/${FW}"
+              if [ ! -d "$SRC" ]; then echo "missing $SRC"; exit 1; fi
+              cp -R "$SRC" "stage/plugins/Frameworks/"
+              DST="stage/plugins/Frameworks/${FW}"
+              rm -rf "$DST/Headers" "$DST/Versions/5/Headers" "$DST/Versions/Current/Headers"
+              find "$DST" -name "*_debug*"      -delete 2>/dev/null || true
+              find "$DST" -name "*.prl"         -delete 2>/dev/null || true
+              find "$DST" -name "Headers"  -type l -delete 2>/dev/null || true
+          done
+
+          # Rewrite each bundled framework's LC_ID_DYLIB to @rpath, plus
+          # rewrite its inter-Qt dependencies so dyld resolves them via
+          # @rpath = @loader_path/Frameworks (set on the plugin dylib).
+          for q in $QT_FWS; do
+              BIN="stage/plugins/Frameworks/Qt${q}.framework/Versions/5/Qt${q}"
+              [ ! -f "$BIN" ] && { echo "missing bin $BIN"; exit 1; }
+              chmod u+w "$BIN"
+              install_name_tool -id "@rpath/Qt${q}.framework/Versions/5/Qt${q}" "$BIN"
+              for q2 in Core Gui Network Widgets DBus PrintSupport; do
+                  install_name_tool -change \
+                      "${QT_PREFIX}/lib/Qt${q2}.framework/Versions/5/Qt${q2}" \
+                      "@rpath/Qt${q2}.framework/Versions/5/Qt${q2}" "$BIN" 2>/dev/null || true
+                  install_name_tool -change \
+                      "/usr/local/opt/qt@5/lib/Qt${q2}.framework/Versions/5/Qt${q2}" \
+                      "@rpath/Qt${q2}.framework/Versions/5/Qt${q2}" "$BIN" 2>/dev/null || true
+              done
+              # Strip symbol table to shrink dylib (frameworks ship full debug)
+              strip -x "$BIN" 2>/dev/null || true
+              echo "--- $BIN ---"
+              otool -L "$BIN" | head -8
+          done
+
+          # Hard-fail if any bundled framework still references brew paths.
+          if find stage/plugins/Frameworks -type f -name 'Qt*' | xargs -I{} otool -L "{}" | grep -E '/usr/local/.*Qt[A-Za-z]+\.framework' ; then
+              echo "ERROR: bundled framework still has /usr/local Qt path"
+              exit 1
+          fi
+
+          # Final layout
+          find stage/plugins -maxdepth 3 -print
+          du -sh stage/plugins
 
       - uses: actions/upload-artifact@v4
         with:

@@ -67,6 +67,11 @@ bool writeUnixHelper(const QString& packagePath)
     out << "for lib in libearshield_mac.dylib earshield_mac.dylib libearshield.dylib libvolumeleveler_mac.dylib; do\n";
     out << "    rm -f \"$PLUGIN_DIR/$lib\" 2>/dev/null\n";
     out << "done\n";
+    // Stale bundled Qt frameworks from a previous install would shadow the
+    // new ones via @loader_path/Frameworks. Wipe them before extracting.
+    out << "for q in Core Gui Network Widgets DBus PrintSupport; do\n";
+    out << "    rm -rf \"$PLUGIN_DIR/Frameworks/Qt${q}.framework\" 2>/dev/null\n";
+    out << "done\n";
     out << "TMP=\"$(mktemp -d)\"\n";
     out << "trap 'rm -rf \"$TMP\"' EXIT\n";
     out << "/usr/bin/ditto -x -k \"$PACKAGE\" \"$TMP\"\n";
