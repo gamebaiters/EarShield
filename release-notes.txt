@@ -1,0 +1,51 @@
+EarShield 6.0.0
+================
+
+Highlights
+----------
+* Cross-platform builds: Windows (x64), Linux (amd64), macOS (Intel x86_64).
+* New self-updating channel: EarShield now polls for new releases on startup
+  and offers a one-click in-place upgrade. Your settings are preserved across
+  updates.
+* Single binary per platform: language (English / Italian) is now selectable
+  at runtime from the global settings dialog and persisted in EarShield.ini.
+  No more separate IT / EN downloads.
+* Robust uninstall: TeamSpeak's Settings -> Plugins -> Uninstall now actually
+  removes the EarShield binary cleanly. Dedicated uninstall scripts are also
+  provided for Windows, Linux, and macOS.
+* Legacy file sweep: leftover Volume Leveler files from older installations
+  are removed automatically when EarShield starts.
+
+Audio engine (unchanged behaviour, polished)
+--------------------------------------------
+* Soft-knee per-sample limiter prevents earrape with no audible clipping.
+* Slow RMS AGC keeps quiet voices boosted to your target dB.
+* Per-client overrides survive reconnects (keyed by TS3 unique identifier).
+* Channel commanders are excluded from auto-boost by default; per-client
+  toggle remains available.
+
+Configuration
+-------------
+Plugins -> EarShield Global Settings:
+  * Limiter ceiling (dBFS, -30..0)
+  * Normalization boost level (dB, 0..30)
+  * Enable/disable auto-normalization
+  * Language (English / Italiano)
+  * Reset native TeamSpeak per-client volumes
+  * Reset all EarShield settings to defaults
+
+Right-click any client -> EarShield Client Settings:
+  * Per-client limiter ceiling
+  * Per-client normalization boost
+  * Per-client normalization on/off
+  * Reset to global
+
+Right-click any client -> Toggle EarShield Ignore:
+  * Bypass EarShield entirely for that client (useful for music bots).
+
+Auto-updater
+------------
+EarShield checks for updates a few seconds after TeamSpeak loads it. If a
+new build is available you are asked whether to update; the helper closes
+TeamSpeak, replaces the plugin binary, and the package installer relaunches.
+EarShield.ini is never touched during updates.

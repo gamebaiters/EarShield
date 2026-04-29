@@ -1,0 +1,175 @@
+name: Release (Win + Linux + macOS)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+  QT_VERSION: '5.15.2'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2019_64
+          modules: ''
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: cmd
+        run: |
+          cmake -B build -G "NMake Makefiles" ^
+              -DCMAKE_BUILD_TYPE=%BUILD_TYPE% ^
+              -DCMAKE_PREFIX_PATH="%QT_ROOT_DIR%"
+
+      - name: Build
+        shell: cmd
+        run: cmake --build build --config %BUILD_TYPE%
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p stage/plugins
+          cp build/EarShield_win64.dll stage/plugins/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: stage/plugins/
+          if-no-files-found: error
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+              build-essential cmake pkg-config zip \
+              qtbase5-dev qttools5-dev qttools5-dev-tools \
+              libqt5network5 libqt5gui5 libqt5widgets5 libqt5core5a
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Stage artifact
+        run: |
+          mkdir -p stage/plugins
+          cp build/libearshield_linux_amd64.so stage/plugins/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: stage/plugins/
+          if-no-files-found: error
+
+  build-macos:
+    runs-on: macos-13
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '10.13'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt5 + tools (Intel runner)
+        run: |
+          brew update || true
+          brew install qt@5
+          echo "$(brew --prefix qt@5)/bin" >> "$GITHUB_PATH"
+
+      - name: Configure (x86_64)
+        run: |
+          cmake -B build \
+              -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+              -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+              -DCMAKE_PREFIX_PATH="$(brew --prefix qt@5)"
+
+      - name: Build
+        run: cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: Stage artifact
+        run: |
+          mkdir -p stage/plugins
+          DYLIB="$(find build -name 'libearshield_mac.dylib' | head -1)"
+          cp "$DYLIB" stage/plugins/libearshield_mac.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-x64
+          path: stage/plugins/
+          if-no-files-found: error
+
+  package-and-release:
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with: { name: windows-x64, path: combined/plugins/ }
+      - uses: actions/download-artifact@v4
+        with: { name: linux-x64,   path: combined/plugins/ }
+      - uses: actions/download-artifact@v4
+        with: { name: macos-x64,   path: combined/plugins/ }
+
+      - name: Resolve version + write package.ini
+        id: ver
+        run: |
+          TAG="${GITHUB_REF##refs/tags/}"
+          VERSION="${TAG#v}"
+          if [ "$TAG" = "$GITHUB_REF" ]; then
+              VERSION="0.0.0-$(date +%Y%m%d%H%M)-$(echo $GITHUB_SHA | cut -c1-7)"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          sed "s/^Version = .*/Version = ${VERSION}/" package.ini > combined/package.ini
+
+      - name: List staged files
+        run: ls -la combined/ combined/plugins/
+
+      - name: Build versioned + stable .ts3_plugin
+        run: |
+          cd combined
+          zip -r "../EarShield_${{ steps.ver.outputs.VERSION }}.ts3_plugin" . -x "**/.DS_Store"
+          cp "../EarShield_${{ steps.ver.outputs.VERSION }}.ts3_plugin" "../EarShield.ts3_plugin"
+
+      - name: Read release notes
+        id: notes
+        run: |
+          if [ -f release-notes.txt ]; then cp release-notes.txt /tmp/notes.txt
+          else echo "Release ${{ steps.ver.outputs.VERSION }}" > /tmp/notes.txt
+          fi
+          echo "NOTES_PATH=/tmp/notes.txt" >> "$GITHUB_OUTPUT"
+
+      - name: Create / update GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "EarShield ${{ github.ref_name }}"
+          body_path: ${{ steps.notes.outputs.NOTES_PATH }}
+          files: |
+            EarShield_*.ts3_plugin
+            EarShield.ts3_plugin
+            dist/uninstall_earshield.bat
+            dist/uninstall_earshield.sh
+            dist/uninstall_earshield_macos.sh
+          fail_on_unmatched_files: false
