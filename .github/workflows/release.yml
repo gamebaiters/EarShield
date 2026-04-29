@@ -151,21 +151,23 @@ jobs:
           if [ -z "$DYLIB" ]; then
               echo "dylib not found"; ls -la build; exit 1
           fi
-          QT_PREFIX="$(/usr/local/bin/brew --prefix qt@5)"
-          echo "Brew Qt prefix: $QT_PREFIX"
+          chmod u+w "$DYLIB"
           echo "--- plugin dylib BEFORE ---"
           otool -L "$DYLIB"
-          for q in Core Widgets Gui Network; do
-              install_name_tool -change \
-                  "${QT_PREFIX}/lib/Qt${q}.framework/Versions/5/Qt${q}" \
-                  "@rpath/Qt${q}.framework/Versions/5/Qt${q}" "$DYLIB" || true
-              install_name_tool -change \
-                  "/usr/local/opt/qt@5/lib/Qt${q}.framework/Versions/5/Qt${q}" \
-                  "@rpath/Qt${q}.framework/Versions/5/Qt${q}" "$DYLIB" || true
+          # Parse every absolute /usr/local/* path referencing a Qt framework
+          # and rewrite to @rpath. Brew install names point at the Cellar
+          # path (/usr/local/Cellar/qt@5/<ver>/lib/...) not the opt symlink,
+          # and the version segment changes between Qt minor releases, so a
+          # static -change pattern cannot cover both layouts at once.
+          otool -L "$DYLIB" | awk '/\/usr\/local\/.*Qt[A-Za-z]+\.framework\/Versions\/[0-9]+\/Qt[A-Za-z]+/ {print $1}' | sort -u | while read -r OLD; do
+              BASE="$(basename "$OLD")"
+              NEW="@rpath/${BASE}.framework/Versions/5/${BASE}"
+              echo "rewrite: $OLD -> $NEW"
+              install_name_tool -change "$OLD" "$NEW" "$DYLIB" || true
           done
           # Plugin loads its bundled Qt frameworks from plugins/Frameworks/
-          # next to the dylib. TS3 itself does not ship the Qt frameworks
-          # the plugin depends on, so we ship our own copies.
+          # next to the dylib. TS3 itself does not ship Qt frameworks the
+          # plugin depends on, so we ship our own copies.
           install_name_tool -add_rpath "@loader_path/Frameworks" "$DYLIB" 2>/dev/null || true
           echo "--- plugin dylib AFTER ---"
           otool -L "$DYLIB"
@@ -199,25 +201,26 @@ jobs:
           done
 
           # Rewrite each bundled framework's LC_ID_DYLIB to @rpath, plus
-          # rewrite its inter-Qt dependencies so dyld resolves them via
-          # @rpath = @loader_path/Frameworks (set on the plugin dylib).
+          # auto-rewrite every absolute /usr/local/* Qt dependency to
+          # @rpath. install names from Brew point at the Cellar path
+          # (/usr/local/Cellar/qt@5/<ver>/lib/...) which embeds the Qt
+          # patch version, so a literal -change pattern cannot match
+          # across rebuilds — parse otool output and rewrite per-line.
           for q in $QT_FWS; do
               BIN="stage/plugins/Frameworks/Qt${q}.framework/Versions/5/Qt${q}"
               [ ! -f "$BIN" ] && { echo "missing bin $BIN"; exit 1; }
               chmod u+w "$BIN"
               install_name_tool -id "@rpath/Qt${q}.framework/Versions/5/Qt${q}" "$BIN"
-              for q2 in Core Gui Network Widgets DBus PrintSupport; do
-                  install_name_tool -change \
-                      "${QT_PREFIX}/lib/Qt${q2}.framework/Versions/5/Qt${q2}" \
-                      "@rpath/Qt${q2}.framework/Versions/5/Qt${q2}" "$BIN" 2>/dev/null || true
-                  install_name_tool -change \
-                      "/usr/local/opt/qt@5/lib/Qt${q2}.framework/Versions/5/Qt${q2}" \
-                      "@rpath/Qt${q2}.framework/Versions/5/Qt${q2}" "$BIN" 2>/dev/null || true
+              otool -L "$BIN" | awk '/\/usr\/local\/.*Qt[A-Za-z]+\.framework\/Versions\/[0-9]+\/Qt[A-Za-z]+/ {print $1}' | sort -u | while read -r OLD; do
+                  BASE="$(basename "$OLD")"
+                  NEW="@rpath/${BASE}.framework/Versions/5/${BASE}"
+                  echo "rewrite($BIN): $OLD -> $NEW"
+                  install_name_tool -change "$OLD" "$NEW" "$BIN" 2>/dev/null || true
               done
               # Strip symbol table to shrink dylib (frameworks ship full debug)
               strip -x "$BIN" 2>/dev/null || true
               echo "--- $BIN ---"
-              otool -L "$BIN" | head -8
+              otool -L "$BIN" | head -10
           done
 
           # Hard-fail if any bundled framework still references brew paths.

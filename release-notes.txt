@@ -1,3 +1,13 @@
+EarShield 6.0.4
+================
+
+* macOS install name rewrite is now automatic: parses otool -L for
+  every /usr/local/* Qt framework reference and rewrites it to @rpath.
+  Brew install names point at /usr/local/Cellar/qt@5/<patch>/lib/...,
+  not /usr/local/opt/qt@5/lib/..., so the previous static -change
+  patterns missed every dependency and the build self-aborted at the
+  regression-guard step.
+
 EarShield 6.0.3
 ================
 
