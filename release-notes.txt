@@ -1,3 +1,15 @@
+EarShield 6.0.5
+================
+
+* macOS bundling now recursive: QtCore links libpcre2-16, libzstd,
+  libglib, libgthread, etc. from Brew. Those non-Qt /usr/local/*
+  dependencies were not bundled in 6.0.4, so QtCore would still fail
+  to load on a clean Mac. The .ts3_plugin now ships every transitive
+  Brew dylib QtCore + QtGui + QtWidgets + QtNetwork pull in,
+  rewritten to @rpath. CI iterates the bundle/rewrite pass up to 8
+  rounds and aborts the build if any /usr/local/* reference remains
+  in any binary.
+
 EarShield 6.0.4
 ================
 

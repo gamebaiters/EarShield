@@ -176,7 +176,7 @@ jobs:
               exit 1
           fi
 
-      - name: Stage macOS artifact + bundle Qt frameworks
+      - name: Stage macOS artifact + bundle Qt frameworks + recursive deps
         run: |
           set -e
           mkdir -p stage/plugins/Frameworks
@@ -187,7 +187,7 @@ jobs:
           QT_FWS="Core Gui Network Widgets"
 
           # Copy each Qt framework into stage/plugins/Frameworks, stripped
-          # of headers / debug / prl files to keep the package small.
+          # of headers / debug / prl files to keep package small.
           for q in $QT_FWS; do
               FW="Qt${q}.framework"
               SRC="${QT_PREFIX}/lib/${FW}"
@@ -195,43 +195,93 @@ jobs:
               cp -R "$SRC" "stage/plugins/Frameworks/"
               DST="stage/plugins/Frameworks/${FW}"
               rm -rf "$DST/Headers" "$DST/Versions/5/Headers" "$DST/Versions/Current/Headers"
-              find "$DST" -name "*_debug*"      -delete 2>/dev/null || true
-              find "$DST" -name "*.prl"         -delete 2>/dev/null || true
-              find "$DST" -name "Headers"  -type l -delete 2>/dev/null || true
+              find "$DST" -name "*_debug*"        -delete 2>/dev/null || true
+              find "$DST" -name "*.prl"           -delete 2>/dev/null || true
+              find "$DST" -name "Headers" -type l -delete 2>/dev/null || true
           done
 
-          # Rewrite each bundled framework's LC_ID_DYLIB to @rpath, plus
-          # auto-rewrite every absolute /usr/local/* Qt dependency to
-          # @rpath. install names from Brew point at the Cellar path
-          # (/usr/local/Cellar/qt@5/<ver>/lib/...) which embeds the Qt
-          # patch version, so a literal -change pattern cannot match
-          # across rebuilds — parse otool output and rewrite per-line.
+          # Set canonical @rpath id on every bundled framework binary.
           for q in $QT_FWS; do
               BIN="stage/plugins/Frameworks/Qt${q}.framework/Versions/5/Qt${q}"
-              [ ! -f "$BIN" ] && { echo "missing bin $BIN"; exit 1; }
               chmod u+w "$BIN"
-              install_name_tool -id "@rpath/Qt${q}.framework/Versions/5/Qt${q}" "$BIN"
-              otool -L "$BIN" | awk '/\/usr\/local\/.*Qt[A-Za-z]+\.framework\/Versions\/[0-9]+\/Qt[A-Za-z]+/ {print $1}' | sort -u | while read -r OLD; do
-                  BASE="$(basename "$OLD")"
-                  NEW="@rpath/${BASE}.framework/Versions/5/${BASE}"
-                  echo "rewrite($BIN): $OLD -> $NEW"
-                  install_name_tool -change "$OLD" "$NEW" "$BIN" 2>/dev/null || true
-              done
-              # Strip symbol table to shrink dylib (frameworks ship full debug)
-              strip -x "$BIN" 2>/dev/null || true
-              echo "--- $BIN ---"
-              otool -L "$BIN" | head -10
+              install_name_tool -id "@rpath/Qt${q}.framework/Versions/5/Qt${q}" "$BIN" 2>/dev/null || true
           done
 
-          # Hard-fail if any bundled framework still references brew paths.
-          if find stage/plugins/Frameworks -type f -name 'Qt*' | xargs -I{} otool -L "{}" | grep -E '/usr/local/.*Qt[A-Za-z]+\.framework' ; then
-              echo "ERROR: bundled framework still has /usr/local Qt path"
+          # Recursive dep bundler. Walks every bundled binary, finds each
+          # /usr/local/* dependency, rewrites the reference to @rpath, and
+          # if the target is not yet present in stage/plugins/Frameworks
+          # copies it there with id @rpath/<basename>. Iterates until a
+          # full pass produces zero changes (fixed point) or hits 8 rounds.
+          rewrite_pass() {
+              local CHANGED=0
+              # Snapshot current binary set (loop body may add more)
+              local TARGETS=()
+              TARGETS+=("stage/plugins/libearshield_mac.dylib")
+              for q in $QT_FWS; do
+                  TARGETS+=("stage/plugins/Frameworks/Qt${q}.framework/Versions/5/Qt${q}")
+              done
+              for f in stage/plugins/Frameworks/*.dylib; do
+                  [ -f "$f" ] && TARGETS+=("$f")
+              done
+              for BIN in "${TARGETS[@]}"; do
+                  [ -f "$BIN" ] || continue
+                  chmod u+w "$BIN"
+                  while IFS= read -r DEP; do
+                      [ -z "$DEP" ] && continue
+                      BASE="$(basename "$DEP")"
+                      if [[ "$DEP" == *.framework/Versions/* ]]; then
+                          NEW="@rpath/${BASE}.framework/Versions/5/${BASE}"
+                      else
+                          NEW="@rpath/${BASE}"
+                          TARGET="stage/plugins/Frameworks/${BASE}"
+                          if [ ! -f "$TARGET" ]; then
+                              cp "$DEP" "$TARGET"
+                              chmod u+w "$TARGET"
+                              install_name_tool -id "@rpath/${BASE}" "$TARGET" 2>/dev/null || true
+                              echo "+bundled: $BASE  (from $DEP)"
+                              CHANGED=1
+                          fi
+                      fi
+                      if install_name_tool -change "$DEP" "$NEW" "$BIN" 2>/dev/null; then
+                          CHANGED=1
+                          echo "rewrite($BIN): $DEP -> $NEW"
+                      fi
+                  done < <(otool -L "$BIN" | awk '/^\t\/usr\/local\// {print $1}' | sort -u)
+              done
+              return $CHANGED
+          }
+
+          for round in 1 2 3 4 5 6 7 8; do
+              echo "===== rewrite round $round ====="
+              rewrite_pass || true
+              # Stop when no /usr/local/* deps anywhere
+              REMAIN=$(find stage/plugins -type f \( -name '*.dylib' -o -path '*/Versions/*/Qt*' \) -exec otool -L {} \; 2>/dev/null | grep -c '^[[:space:]]*/usr/local/' || true)
+              echo "remaining /usr/local/ refs: $REMAIN"
+              [ "$REMAIN" = "0" ] && break
+          done
+
+          # Strip symbol tables to shrink package
+          for BIN in stage/plugins/Frameworks/*.dylib stage/plugins/Frameworks/Qt*.framework/Versions/5/Qt*; do
+              [ -f "$BIN" ] && strip -x "$BIN" 2>/dev/null || true
+          done
+
+          # Final regression guard — fail loudly if any /usr/local/* ref
+          # remains in any plugin binary.
+          BAD=$(find stage/plugins -type f \( -name '*.dylib' -o -path '*/Versions/*/Qt*' \) -exec otool -L {} \; 2>/dev/null | grep '/usr/local/' || true)
+          if [ -n "$BAD" ]; then
+              echo "ERROR: stage still has /usr/local/* references:"
+              echo "$BAD"
               exit 1
           fi
 
           # Final layout
+          echo "--- final layout ---"
           find stage/plugins -maxdepth 3 -print
           du -sh stage/plugins
+          echo "--- plugin dylib otool ---"
+          otool -L stage/plugins/libearshield_mac.dylib
+          echo "--- QtCore otool ---"
+          otool -L stage/plugins/Frameworks/QtCore.framework/Versions/5/QtCore | head -15
 
       - uses: actions/upload-artifact@v4
         with:
