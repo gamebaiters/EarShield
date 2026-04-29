@@ -1,3 +1,12 @@
+EarShield 6.0.2
+================
+
+* macOS plugin load fix: dylib's Qt framework references are now
+  rewritten from absolute Homebrew paths (/usr/local/opt/qt@5/...)
+  to @rpath so TeamSpeak 3.app's bundled Qt resolves correctly.
+  Plugin would silently fail to load on every Mac that did not have
+  Homebrew Qt5 installed at the build host's path.
+
 EarShield 6.0.1
 ================
 

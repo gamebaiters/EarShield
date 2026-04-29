@@ -151,10 +151,32 @@ jobs:
           if [ -z "$DYLIB" ]; then
               echo "dylib not found"; ls -la build; exit 1
           fi
+          QT_PREFIX="$(/usr/local/bin/brew --prefix qt@5)"
+          echo "Brew Qt prefix: $QT_PREFIX"
+          echo "--- before ---"
+          otool -L "$DYLIB"
+          # Rewrite absolute Brew paths to @rpath so TS3's bundled Qt
+          # frameworks at TeamSpeak\ 3.app/Contents/Frameworks/ resolve.
           for q in Core Widgets Gui Network; do
-              install_name_tool -change "libQt5${q}.dylib" "@rpath/libQt5${q}.dylib" "$DYLIB" || true
-              install_name_tool -change "@rpath/Qt${q}.framework/Versions/5/Qt${q}" "@rpath/libQt5${q}.dylib" "$DYLIB" || true
+              install_name_tool -change \
+                  "${QT_PREFIX}/lib/Qt${q}.framework/Versions/5/Qt${q}" \
+                  "@rpath/Qt${q}.framework/Versions/5/Qt${q}" "$DYLIB" || true
+              install_name_tool -change \
+                  "/usr/local/opt/qt@5/lib/Qt${q}.framework/Versions/5/Qt${q}" \
+                  "@rpath/Qt${q}.framework/Versions/5/Qt${q}" "$DYLIB" || true
           done
+          # Add Frameworks rpaths TS3 loads from on macOS so the @rpath
+          # references above resolve regardless of where the user has
+          # installed TeamSpeak 3.app.
+          install_name_tool -add_rpath "@loader_path/../Frameworks" "$DYLIB" 2>/dev/null || true
+          install_name_tool -add_rpath "@executable_path/../Frameworks" "$DYLIB" 2>/dev/null || true
+          echo "--- after ---"
+          otool -L "$DYLIB"
+          # Fail loudly if any /usr/local/ absolute references remain
+          if otool -L "$DYLIB" | grep -E '/usr/local/.*Qt[A-Za-z]+\.framework' >/dev/null; then
+              echo "ERROR: dylib still has hardcoded Qt absolute paths"
+              exit 1
+          fi
 
       - name: Stage macOS artifact
         run: |
