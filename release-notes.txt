@@ -1,3 +1,17 @@
+EarShield 6.0.7
+================
+
+* Fix double-Qt rewrite bug (v6.0.6 regression): the macOS dylib
+  rewriter built @rpath references as libQt5QtCore.dylib instead of
+  libQt5Core.dylib (it concatenated the libQt5 prefix with the full
+  framework basename QtCore). dlopen failed with "Library not loaded:
+  @rpath/libQt5QtCore.dylib" on every Mac. Now strips the leading Qt
+  from the framework basename before constructing the @rpath name.
+* CI guard: workflow now enumerates every @rpath/<file> reference in
+  every bundled binary and aborts the build if any of them does not
+  resolve to a file actually present in stage/plugins/. Catches the
+  next install-name typo at CI time instead of in the field.
+
 EarShield 6.0.6
 ================
 

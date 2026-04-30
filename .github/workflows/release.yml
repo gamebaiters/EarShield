@@ -194,10 +194,14 @@ jobs:
                   chmod u+w "$BIN"
                   while IFS= read -r DEP; do
                       [ -z "$DEP" ] && continue
-                      local BASE NEW TARGET
+                      local BASE NEW TARGET SHORT
                       if [[ "$DEP" == *.framework/Versions/* ]]; then
+                          # /usr/local/Cellar/qt@5/X/lib/QtCore.framework/Versions/5/QtCore -> QtCore
                           BASE="$(basename "$DEP")"
-                          NEW="@rpath/libQt5${BASE}.dylib"
+                          # Strip leading Qt to avoid libQt5QtCore.dylib (double Qt).
+                          # We bundle these as plain dylibs named libQt5<short>.dylib.
+                          SHORT="${BASE#Qt}"
+                          NEW="@rpath/libQt5${SHORT}.dylib"
                       else
                           BASE="$(basename "$DEP")"
                           NEW="@rpath/${BASE}"
@@ -236,6 +240,29 @@ jobs:
           if [ -n "$BAD" ]; then
               echo "ERROR: stage still has /usr/local/* references:"
               echo "$BAD"
+              exit 1
+          fi
+
+          # Sanity: every @rpath/<name> reference in every binary must
+          # resolve to an actual file in stage/plugins/. Catches install
+          # name typos (e.g. libQt5QtCore.dylib double-Qt regression).
+          MISSING=""
+          for BIN in stage/plugins/*.dylib; do
+              [ -f "$BIN" ] || continue
+              while IFS= read -r REF; do
+                  [ -z "$REF" ] && continue
+                  TARGET="${REF#@rpath/}"
+                  if [ "$TARGET" = "$(basename "$BIN")" ]; then continue; fi
+                  if [ ! -f "stage/plugins/${TARGET}" ]; then
+                      MISSING="${MISSING}
+  $(basename "$BIN") -> $REF"
+                  fi
+              done < <(otool -L "$BIN" | awk '/^\t@rpath\// {print $1}' | sort -u)
+          done
+          if [ -n "$MISSING" ]; then
+              echo "ERROR: dangling @rpath references in bundle:${MISSING}"
+              echo "--- present files ---"
+              ls stage/plugins/
               exit 1
           fi
 
