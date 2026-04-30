@@ -246,7 +246,7 @@ jobs:
           # Sanity: every @rpath/<name> reference in every binary must
           # resolve to an actual file in stage/plugins/. Catches install
           # name typos (e.g. libQt5QtCore.dylib double-Qt regression).
-          MISSING=""
+          MISSING_FILE="$(mktemp)"
           for BIN in stage/plugins/*.dylib; do
               [ -f "$BIN" ] || continue
               while IFS= read -r REF; do
@@ -254,17 +254,18 @@ jobs:
                   TARGET="${REF#@rpath/}"
                   if [ "$TARGET" = "$(basename "$BIN")" ]; then continue; fi
                   if [ ! -f "stage/plugins/${TARGET}" ]; then
-                      MISSING="${MISSING}
-  $(basename "$BIN") -> $REF"
+                      echo "  $(basename "$BIN") -> $REF" >> "$MISSING_FILE"
                   fi
               done < <(otool -L "$BIN" | awk '/^\t@rpath\// {print $1}' | sort -u)
           done
-          if [ -n "$MISSING" ]; then
-              echo "ERROR: dangling @rpath references in bundle:${MISSING}"
+          if [ -s "$MISSING_FILE" ]; then
+              echo "ERROR: dangling @rpath references in bundle:"
+              cat "$MISSING_FILE"
               echo "--- present files ---"
               ls stage/plugins/
               exit 1
           fi
+          rm -f "$MISSING_FILE"
 
           # Ad-hoc codesign every dylib so Gatekeeper does not block dlopen
           for BIN in stage/plugins/*.dylib; do
