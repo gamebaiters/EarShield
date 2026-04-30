@@ -49,11 +49,10 @@ rm -f "$PLUGINS_DIR/earshield_mac.dylib"        2>/dev/null
 rm -f "$PLUGINS_DIR/libearshield.dylib"         2>/dev/null
 rm -f "$PLUGINS_DIR/libvolumeleveler_mac.dylib" 2>/dev/null
 
-echo "Removing bundled Qt frameworks..."
-for q in Core Gui Network Widgets DBus PrintSupport; do
-    rm -rf "$PLUGINS_DIR/Frameworks/Qt${q}.framework" 2>/dev/null
-done
-rmdir "$PLUGINS_DIR/Frameworks" 2>/dev/null || true
+echo "Removing bundled Qt + transitive dylibs..."
+rm -f "$PLUGINS_DIR"/lib*.dylib  2>/dev/null || true
+rm -f "$PLUGINS_DIR"/Qt*.dylib   2>/dev/null || true
+rm -rf "$PLUGINS_DIR/Frameworks" 2>/dev/null || true
 
 echo "Removing log files..."
 rm -f "$TS3_BASE"/earshield*.log 2>/dev/null

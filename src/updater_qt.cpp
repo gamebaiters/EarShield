@@ -67,17 +67,20 @@ bool writeUnixHelper(const QString& packagePath)
     out << "for lib in libearshield_mac.dylib earshield_mac.dylib libearshield.dylib libvolumeleveler_mac.dylib; do\n";
     out << "    rm -f \"$PLUGIN_DIR/$lib\" 2>/dev/null\n";
     out << "done\n";
-    // Stale bundled Qt frameworks from a previous install would shadow the
-    // new ones via @loader_path/Frameworks. Wipe them before extracting.
-    out << "for q in Core Gui Network Widgets DBus PrintSupport; do\n";
-    out << "    rm -rf \"$PLUGIN_DIR/Frameworks/Qt${q}.framework\" 2>/dev/null\n";
-    out << "done\n";
+    // Wipe every bundled Qt + transitive dep dylib from the prior install
+    // so we don't end up with stale libs alongside fresh ones, plus clean
+    // up legacy v6.0.x Frameworks subdir layout.
+    out << "rm -f \"$PLUGIN_DIR\"/lib*.dylib  2>/dev/null || true\n";
+    out << "rm -f \"$PLUGIN_DIR\"/Qt*.dylib   2>/dev/null || true\n";
+    out << "rm -rf \"$PLUGIN_DIR/Frameworks\" 2>/dev/null || true\n";
     out << "TMP=\"$(mktemp -d)\"\n";
     out << "trap 'rm -rf \"$TMP\"' EXIT\n";
     out << "/usr/bin/ditto -x -k \"$PACKAGE\" \"$TMP\"\n";
     out << "if [ -d \"$TMP/plugins\" ]; then\n";
     out << "    cp -R \"$TMP/plugins/.\" \"$PLUGIN_DIR/\"\n";
-    out << "    find \"$PLUGIN_DIR\" -maxdepth 1 -name 'libearshield*.dylib' -exec xattr -dr com.apple.quarantine {} + 2>/dev/null || true\n";
+    out << "    xattr -cr \"$PLUGIN_DIR\" 2>/dev/null || true\n";
+    // Re-sign every dylib ad-hoc so Gatekeeper has a fresh local signature.
+    out << "    find \"$PLUGIN_DIR\" -maxdepth 1 -name '*.dylib' -print0 | xargs -0 -I {} codesign --force -s - {} 2>/dev/null || true\n";
     out << "fi\n";
     out << "open -a 'TeamSpeak 3' 2>/dev/null || true\n";
 #else

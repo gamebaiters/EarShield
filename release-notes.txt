@@ -1,3 +1,24 @@
+EarShield 6.0.6
+================
+
+* macOS now ships a dedicated installer .app:
+  Install_EarShield_macOS.zip is attached to every release and is the
+  recommended install path on macOS. Double-click the .app and confirm
+  the install dialog. The installer closes TS3, copies the plugin and
+  every bundled dylib into the right plugin folder, clears Gatekeeper
+  quarantine, and ad-hoc re-signs each binary.
+* Plugin layout flattened on macOS: the .ts3_plugin no longer relies
+  on a Frameworks/ subdirectory (TS3's macOS Add-On installer flattens
+  subdirs, dropping the Qt frameworks entirely). Qt5Core/Gui/Network/
+  Widgets are now extracted as plain libQt5<X>.dylib files alongside
+  the plugin dylib, identical to how the Soundboard plugin ships
+  bundled FFmpeg.
+* Plugin rpath: @loader_path. Every bundled dependency lives next to
+  the plugin dylib in plugins/.
+* Uninstall script + auto-updater helper updated to wipe every
+  lib*.dylib / Qt*.dylib in the plugin folder + remove the legacy
+  Frameworks/ subdirectory from older 6.0.x layouts.
+
 EarShield 6.0.5
 ================
 

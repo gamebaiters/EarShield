@@ -145,100 +145,68 @@ jobs:
       - name: Build
         run: cmake --build build -j"$(sysctl -n hw.ncpu)"
 
-      - name: Rewrite plugin dylib install names + add rpath
-        run: |
-          DYLIB="$(find build -name 'libearshield_mac.dylib' | head -1)"
-          if [ -z "$DYLIB" ]; then
-              echo "dylib not found"; ls -la build; exit 1
-          fi
-          chmod u+w "$DYLIB"
-          echo "--- plugin dylib BEFORE ---"
-          otool -L "$DYLIB"
-          # Parse every absolute /usr/local/* path referencing a Qt framework
-          # and rewrite to @rpath. Brew install names point at the Cellar
-          # path (/usr/local/Cellar/qt@5/<ver>/lib/...) not the opt symlink,
-          # and the version segment changes between Qt minor releases, so a
-          # static -change pattern cannot cover both layouts at once.
-          otool -L "$DYLIB" | awk '/\/usr\/local\/.*Qt[A-Za-z]+\.framework\/Versions\/[0-9]+\/Qt[A-Za-z]+/ {print $1}' | sort -u | while read -r OLD; do
-              BASE="$(basename "$OLD")"
-              NEW="@rpath/${BASE}.framework/Versions/5/${BASE}"
-              echo "rewrite: $OLD -> $NEW"
-              install_name_tool -change "$OLD" "$NEW" "$DYLIB" || true
-          done
-          # Plugin loads its bundled Qt frameworks from plugins/Frameworks/
-          # next to the dylib. TS3 itself does not ship Qt frameworks the
-          # plugin depends on, so we ship our own copies.
-          install_name_tool -add_rpath "@loader_path/Frameworks" "$DYLIB" 2>/dev/null || true
-          echo "--- plugin dylib AFTER ---"
-          otool -L "$DYLIB"
-          if otool -L "$DYLIB" | grep -E '/usr/local/.*Qt[A-Za-z]+\.framework' >/dev/null; then
-              echo "ERROR: dylib still has hardcoded Qt absolute paths"
-              exit 1
-          fi
-
-      - name: Stage macOS artifact + bundle Qt frameworks + recursive deps
+      - name: Stage macOS artifact (flat dylibs, recursive deps)
         run: |
           set -e
-          mkdir -p stage/plugins/Frameworks
+          mkdir -p stage/plugins
           DYLIB="$(find build -name 'libearshield_mac.dylib' | head -1)"
+          [ -z "$DYLIB" ] && { echo "dylib not found"; ls -la build; exit 1; }
           cp "$DYLIB" stage/plugins/libearshield_mac.dylib
+          chmod u+w stage/plugins/libearshield_mac.dylib
 
           QT_PREFIX="$(/usr/local/bin/brew --prefix qt@5)"
           QT_FWS="Core Gui Network Widgets"
 
-          # Copy each Qt framework into stage/plugins/Frameworks, stripped
-          # of headers / debug / prl files to keep package small.
+          # TS3's macOS .ts3_plugin installer flattens any subdir under
+          # plugins/, so framework directories are dropped entirely.
+          # Workaround: extract each Qt framework's binary as a plain
+          # dylib at plugins/<libQt5X.dylib>. Same pattern soundboard
+          # uses for FFmpeg. TS3 will try to load each as a plugin and
+          # log a harmless "Required plugin function not found" warning.
           for q in $QT_FWS; do
-              FW="Qt${q}.framework"
-              SRC="${QT_PREFIX}/lib/${FW}"
-              if [ ! -d "$SRC" ]; then echo "missing $SRC"; exit 1; fi
-              cp -R "$SRC" "stage/plugins/Frameworks/"
-              DST="stage/plugins/Frameworks/${FW}"
-              rm -rf "$DST/Headers" "$DST/Versions/5/Headers" "$DST/Versions/Current/Headers"
-              find "$DST" -name "*_debug*"        -delete 2>/dev/null || true
-              find "$DST" -name "*.prl"           -delete 2>/dev/null || true
-              find "$DST" -name "Headers" -type l -delete 2>/dev/null || true
+              SRC="${QT_PREFIX}/lib/Qt${q}.framework/Versions/5/Qt${q}"
+              [ ! -f "$SRC" ] && { echo "missing Qt$q binary"; exit 1; }
+              DST="stage/plugins/libQt5${q}.dylib"
+              cp "$SRC" "$DST"
+              chmod u+w "$DST"
+              install_name_tool -id "@rpath/libQt5${q}.dylib" "$DST"
           done
 
-          # Set canonical @rpath id on every bundled framework binary.
-          for q in $QT_FWS; do
-              BIN="stage/plugins/Frameworks/Qt${q}.framework/Versions/5/Qt${q}"
-              chmod u+w "$BIN"
-              install_name_tool -id "@rpath/Qt${q}.framework/Versions/5/Qt${q}" "$BIN" 2>/dev/null || true
-          done
+          # Plugin dylib rpath: @loader_path so it finds bundled dylibs
+          # next to itself in plugins/.
+          install_name_tool -add_rpath "@loader_path" stage/plugins/libearshield_mac.dylib 2>/dev/null || true
 
           # Recursive dep bundler. Walks every bundled binary, finds each
-          # /usr/local/* dependency, rewrites the reference to @rpath, and
-          # if the target is not yet present in stage/plugins/Frameworks
-          # copies it there with id @rpath/<basename>. Iterates until a
-          # full pass produces zero changes (fixed point) or hits 8 rounds.
+          # /usr/local/* dependency, rewrites the reference to @rpath:
+          #   - Qt framework deps  -> @rpath/libQt5<X>.dylib
+          #   - plain dylibs       -> @rpath/<basename>; copy flat into
+          #                          plugins/ and id-stamp them too.
+          # Iterates until a full pass produces zero changes or 8 rounds.
           rewrite_pass() {
               local CHANGED=0
-              # Snapshot current binary set (loop body may add more)
               local TARGETS=()
-              TARGETS+=("stage/plugins/libearshield_mac.dylib")
-              for q in $QT_FWS; do
-                  TARGETS+=("stage/plugins/Frameworks/Qt${q}.framework/Versions/5/Qt${q}")
-              done
-              for f in stage/plugins/Frameworks/*.dylib; do
+              for f in stage/plugins/libearshield_mac.dylib stage/plugins/lib*.dylib; do
                   [ -f "$f" ] && TARGETS+=("$f")
               done
+              local BIN
               for BIN in "${TARGETS[@]}"; do
                   [ -f "$BIN" ] || continue
                   chmod u+w "$BIN"
                   while IFS= read -r DEP; do
                       [ -z "$DEP" ] && continue
-                      BASE="$(basename "$DEP")"
+                      local BASE NEW TARGET
                       if [[ "$DEP" == *.framework/Versions/* ]]; then
-                          NEW="@rpath/${BASE}.framework/Versions/5/${BASE}"
+                          BASE="$(basename "$DEP")"
+                          NEW="@rpath/libQt5${BASE}.dylib"
                       else
+                          BASE="$(basename "$DEP")"
                           NEW="@rpath/${BASE}"
-                          TARGET="stage/plugins/Frameworks/${BASE}"
+                          TARGET="stage/plugins/${BASE}"
                           if [ ! -f "$TARGET" ]; then
                               cp "$DEP" "$TARGET"
                               chmod u+w "$TARGET"
                               install_name_tool -id "@rpath/${BASE}" "$TARGET" 2>/dev/null || true
-                              echo "+bundled: $BASE  (from $DEP)"
+                              echo "+bundled: $BASE (from $DEP)"
                               CHANGED=1
                           fi
                       fi
@@ -254,34 +222,93 @@ jobs:
           for round in 1 2 3 4 5 6 7 8; do
               echo "===== rewrite round $round ====="
               rewrite_pass || true
-              # Stop when no /usr/local/* deps anywhere
-              REMAIN=$(find stage/plugins -type f \( -name '*.dylib' -o -path '*/Versions/*/Qt*' \) -exec otool -L {} \; 2>/dev/null | grep -c '^[[:space:]]*/usr/local/' || true)
+              REMAIN=$(find stage/plugins -maxdepth 1 -name '*.dylib' -exec otool -L {} \; 2>/dev/null | grep -c '^[[:space:]]*/usr/local/' || true)
               echo "remaining /usr/local/ refs: $REMAIN"
               [ "$REMAIN" = "0" ] && break
           done
 
-          # Strip symbol tables to shrink package
-          for BIN in stage/plugins/Frameworks/*.dylib stage/plugins/Frameworks/Qt*.framework/Versions/5/Qt*; do
+          # Strip symbol tables
+          for BIN in stage/plugins/*.dylib; do
               [ -f "$BIN" ] && strip -x "$BIN" 2>/dev/null || true
           done
 
-          # Final regression guard — fail loudly if any /usr/local/* ref
-          # remains in any plugin binary.
-          BAD=$(find stage/plugins -type f \( -name '*.dylib' -o -path '*/Versions/*/Qt*' \) -exec otool -L {} \; 2>/dev/null | grep '/usr/local/' || true)
+          BAD=$(find stage/plugins -maxdepth 1 -name '*.dylib' -exec otool -L {} \; 2>/dev/null | grep '/usr/local/' || true)
           if [ -n "$BAD" ]; then
               echo "ERROR: stage still has /usr/local/* references:"
               echo "$BAD"
               exit 1
           fi
 
-          # Final layout
-          echo "--- final layout ---"
-          find stage/plugins -maxdepth 3 -print
+          # Ad-hoc codesign every dylib so Gatekeeper does not block dlopen
+          for BIN in stage/plugins/*.dylib; do
+              codesign --force -s - "$BIN" 2>/dev/null || true
+          done
+
+          echo "--- final flat layout ---"
+          ls -la stage/plugins/
           du -sh stage/plugins
           echo "--- plugin dylib otool ---"
           otool -L stage/plugins/libearshield_mac.dylib
-          echo "--- QtCore otool ---"
-          otool -L stage/plugins/Frameworks/QtCore.framework/Versions/5/QtCore | head -15
+
+      - name: Build macOS-only .ts3_plugin (input for the .app installer)
+        run: |
+          PKG_ROOT="$(mktemp -d)"
+          mkdir -p "$PKG_ROOT/plugins"
+          TAG="${GITHUB_REF##refs/tags/}"
+          VERSION="${TAG#v}"
+          if [ "$TAG" = "$GITHUB_REF" ]; then
+              VERSION="0.0.0-$(date +%Y%m%d%H%M)-$(echo $GITHUB_SHA | cut -c1-7)"
+          fi
+          sed "s/^Version = .*/Version = ${VERSION}/" package.ini > "$PKG_ROOT/package.ini"
+          cp -R stage/plugins/. "$PKG_ROOT/plugins/"
+          MAC_PKG="$(pwd)/EarShield_${VERSION}_macos_x86_64.ts3_plugin"
+          rm -f "$MAC_PKG"
+          (cd "$PKG_ROOT" && zip -r "$MAC_PKG" . -x "**/.DS_Store")
+          ls -la "$MAC_PKG"
+          echo "MAC_PKG=$MAC_PKG" >> "$GITHUB_ENV"
+
+      - name: Build Install EarShield.app via osacompile
+        run: |
+          APP_NAME="Install EarShield"
+          APP_BUILD_DIR="$(pwd)/macinstaller"
+          rm -rf "$APP_BUILD_DIR"
+          mkdir -p "$APP_BUILD_DIR"
+          cd "$APP_BUILD_DIR"
+
+          cat > installer.applescript <<'AS'
+          on run
+              try
+                  set appPath to POSIX path of (path to me)
+                  set scriptPath to appPath & "Contents/Resources/install_embedded_macos.sh"
+                  set pluginPath to appPath & "Contents/Resources/EarShield.ts3_plugin"
+                  display dialog "Install EarShield for TeamSpeak 3?" buttons {"Cancel", "Install"} default button "Install" with icon note with title "EarShield Installer"
+                  if button returned of result is not "Install" then return
+                  set installedTo to do shell script "/bin/bash " & quoted form of scriptPath & " " & quoted form of pluginPath
+                  display dialog "Installation complete." & return & return & "Plugin folder: " & installedTo & return & return & "Reopen TeamSpeak 3 and enable EarShield from Tools -> Options -> Addons if it is not already active." buttons {"OK"} default button "OK" with icon note with title "EarShield Installer"
+              on error errMsg number errNum
+                  if errNum is -128 then return
+                  display dialog "Installation failed:" & return & return & errMsg buttons {"OK"} default button "OK" with icon stop with title "EarShield Installer"
+              end try
+          end run
+          AS
+
+          osacompile -o "${APP_NAME}.app" installer.applescript
+
+          cp "$MAC_PKG"                              "${APP_NAME}.app/Contents/Resources/EarShield.ts3_plugin"
+          cp ../dist/install_embedded_macos.sh       "${APP_NAME}.app/Contents/Resources/"
+          chmod +x                                    "${APP_NAME}.app/Contents/Resources/install_embedded_macos.sh"
+
+          codesign --force --deep -s - "${APP_NAME}.app"
+          codesign --verify --deep --verbose=2 "${APP_NAME}.app" || true
+
+          zip -r ../Install_EarShield_macOS.zip "${APP_NAME}.app"
+          ls -la ../Install_EarShield_macOS.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: Install_EarShield_macOS.zip
+          if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
         with:
@@ -303,6 +330,8 @@ jobs:
         with: { name: linux-x64,   path: combined/plugins/ }
       - uses: actions/download-artifact@v4
         with: { name: macos-x64,   path: combined/plugins/ }
+      - uses: actions/download-artifact@v4
+        with: { name: macos-installer, path: ./ }
 
       - name: Resolve version + write package.ini
         id: ver
@@ -341,6 +370,7 @@ jobs:
           files: |
             EarShield_*.ts3_plugin
             EarShield.ts3_plugin
+            Install_EarShield_macOS.zip
             dist/uninstall_earshield.bat
             dist/uninstall_earshield.sh
             dist/uninstall_earshield_macos.sh
