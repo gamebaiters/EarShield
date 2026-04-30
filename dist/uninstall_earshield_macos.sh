@@ -49,10 +49,34 @@ rm -f "$PLUGINS_DIR/earshield_mac.dylib"        2>/dev/null
 rm -f "$PLUGINS_DIR/libearshield.dylib"         2>/dev/null
 rm -f "$PLUGINS_DIR/libvolumeleveler_mac.dylib" 2>/dev/null
 
-echo "Removing bundled Qt + transitive dylibs..."
-rm -f "$PLUGINS_DIR"/lib*.dylib  2>/dev/null || true
-rm -f "$PLUGINS_DIR"/Qt*.dylib   2>/dev/null || true
-rm -rf "$PLUGINS_DIR/Frameworks" 2>/dev/null || true
+echo "Removing legacy bundled Qt + transitive dylibs (EarShield-specific only)..."
+# Scoped removal — never wildcard-delete *.dylib in the plugin folder
+# because other plugins (Soundboard, etc.) bundle their own dylibs there.
+LEGACY_DYLIBS=(
+    libearshield_mac.dylib
+    earshield_mac.dylib
+    libearshield.dylib
+    libvolumeleveler_mac.dylib
+    libQt5Core.dylib
+    libQt5Gui.dylib
+    libQt5Network.dylib
+    libQt5Widgets.dylib
+    libglib-2.0.0.dylib
+    libgthread-2.0.0.dylib
+    libintl.8.dylib
+    libmd4c.0.dylib
+    libpcre2-16.0.dylib
+    libpcre2-8.0.dylib
+    libpng16.16.dylib
+    libzstd.1.dylib
+)
+for f in "${LEGACY_DYLIBS[@]}"; do
+    rm -f "$PLUGINS_DIR/$f" 2>/dev/null || true
+done
+for q in Core Gui Network Widgets DBus PrintSupport; do
+    rm -rf "$PLUGINS_DIR/Frameworks/Qt${q}.framework" 2>/dev/null || true
+done
+[ -d "$PLUGINS_DIR/Frameworks" ] && rmdir "$PLUGINS_DIR/Frameworks" 2>/dev/null || true
 
 echo "Removing log files..."
 rm -f "$TS3_BASE"/earshield*.log 2>/dev/null

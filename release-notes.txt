@@ -1,3 +1,28 @@
+EarShield 6.0.9
+================
+
+* macOS: dropped Qt UI entirely. TeamSpeak Client on macOS statically
+  links Qt without exporting symbols, so any second copy of Qt loaded
+  into the process gets QApplication::instance() = NULL in its private
+  state and qFatal-aborts on the first QWidget construction. The
+  macOS plugin is now Qt-free:
+    - audio AGC + limiter run as before (no Qt dependency)
+    - Plugins -> EarShield Global Settings opens EarShield.ini in the
+      default editor (open <path>) and prints the path to the chat tab
+    - Plugins -> Check for EarShield Updates opens the GitHub releases
+      page in the browser
+    - per-client overrides on macOS go through editing EarShield.ini
+      manually (the plugin prints the exact lines to add and the
+      client UUID to use)
+* macOS .ts3_plugin / Install_EarShield_macOS.zip now ship a single
+  small Qt-free dylib (no bundled Qt, no transitive Brew deps), a
+  fraction of the previous size.
+* macOS install script no longer wildcard-deletes *.dylib from the
+  plugin folder. Only EarShield's own files plus a fixed legacy list
+  are removed, so installing EarShield on top of Soundboard (or any
+  other plugin that bundles its own dylibs) no longer wipes the other
+  plugin's deps. Same fix applied to the macOS uninstall script.
+
 EarShield 6.0.8
 ================
 

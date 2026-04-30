@@ -25,6 +25,18 @@
 #include <string>
 #include <sstream>
 
+// macOS: TeamSpeak Client statically links Qt without exporting symbols, so
+// any second copy of Qt loaded into the process gets QCoreApplication::self
+// = NULL in *its* private state. QWidget construction then triggers qFatal,
+// crashing the host. We therefore drop Qt UI + Qt-based auto-updater on
+// macOS entirely. The plugin still does its full audio processing job;
+// configuration on macOS is via EarShield.ini (opened on demand) and the
+// updater menu opens the GitHub releases page in the browser.
+#ifndef __APPLE__
+#define EARSHIELD_HAVE_QT 1
+#endif
+
+#ifdef EARSHIELD_HAVE_QT
 #include <QtWidgets/QDialog>
 #include <QtWidgets/QSlider>
 #include <QtWidgets/QLabel>
@@ -39,6 +51,7 @@
 #include <QtCore/QEvent>
 #include <QtCore/QTimer>
 #include <QtCore/QPointer>
+#endif
 
 #include "teamspeak/public_errors.h"
 #include "teamspeak/public_errors_rare.h"
@@ -47,7 +60,9 @@
 #include "ts3_functions.h"
 #include "plugin.h"
 #include "version.h"
+#ifdef EARSHIELD_HAVE_QT
 #include "UpdateChecker.h"
+#endif
 #include "debug_log.h"
 
 static struct TS3Functions ts3Functions;
@@ -101,7 +116,9 @@ static std::map<std::string, float>   persistentLimiterDBs;
 static std::map<std::string, float>   persistentNormLevelDBs;
 static std::map<std::string, bool>    persistentNormEnableOverrides;
 
+#ifdef EARSHIELD_HAVE_QT
 static QPointer<UpdateChecker> g_updater;
+#endif
 
 static bool isItalian() { return langCode == "it"; }
 
@@ -262,6 +279,7 @@ int ts3plugin_init() {
     ESLOG("legacy DLL sweep done");
 #endif
 
+#ifdef EARSHIELD_HAVE_QT
     if (QCoreApplication::instance()) {
         ESLOG("scheduling UpdateChecker creation in 3500ms");
         QTimer::singleShot(3500, []() {
@@ -285,12 +303,16 @@ int ts3plugin_init() {
     } else {
         ESLOG("[WARN] QCoreApplication::instance() is null at init - skipping update check");
     }
+#else
+    ESLOG("macOS build: Qt-based auto-updater disabled, use Plugins -> Check for EarShield Updates menu");
+#endif
     ESLOG("ts3plugin_init end");
     return 0;
 }
 
 static void plugin_kill() {
     ESLOG("plugin_kill begin");
+#ifdef EARSHIELD_HAVE_QT
     if (g_updater) {
         ESLOG("deleting UpdateChecker %p", (void*)g_updater.data());
         delete g_updater.data();
@@ -303,6 +325,7 @@ static void plugin_kill() {
         QCoreApplication::processEvents(QEventLoop::AllEvents, 200);
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
     }
+#endif
 
     agcStates.clear();
     ignoredClients.clear();
@@ -420,8 +443,11 @@ void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuType type, int menuI
     char msg[256];
     ESLOG("onMenuItemEvent type=%d id=%d schid=%llu selected=%llu",
         (int)type, menuItemID, (unsigned long long)schid, (unsigned long long)selectedItemID);
-    ESLOG("  thread=main? QApplication=%p QCoreApp=%p",
-        (void*)QCoreApplication::instance(), (void*)QCoreApplication::instance());
+#ifdef EARSHIELD_HAVE_QT
+    ESLOG("  QCoreApp=%p", (void*)QCoreApplication::instance());
+#else
+    ESLOG("  Qt UI disabled on macOS build");
+#endif
 
     try {
 
@@ -444,6 +470,7 @@ void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuType type, int menuI
 
         if (menuItemID == MENU_ID_GLOBAL_CHECK_UPDATE) {
             ESLOG("MENU_ID_GLOBAL_CHECK_UPDATE handler");
+#ifdef EARSHIELD_HAVE_QT
             if (!g_updater) {
                 ESLOG("creating UpdateChecker on demand");
                 g_updater = new UpdateChecker();
@@ -452,9 +479,16 @@ void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuType type, int menuI
             ESLOG("calling checkForUpdates(silent=false)");
             g_updater->checkForUpdates(false);
             ESLOG("checkForUpdates returned");
+#else
+            ts3Functions.printMessageToCurrentTab(
+                "EarShield: opening latest release page in browser - "
+                "https://github.com/gamebaiters/EarShield/releases/latest");
+            (void)system("open https://github.com/gamebaiters/EarShield/releases/latest");
+#endif
             return;
         }
 
+#ifdef EARSHIELD_HAVE_QT
         if (menuItemID == MENU_ID_GLOBAL_CONFIGURE) {
             ESLOG("MENU_ID_GLOBAL_CONFIGURE handler - constructing global dialog");
             QDialog* dlg = new QDialog();
@@ -557,6 +591,22 @@ void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuType type, int menuI
             ESLOG("global dialog show() returned");
             return;
         }
+#else
+        // macOS: open EarShield.ini in default editor instead of QDialog.
+        if (menuItemID == MENU_ID_GLOBAL_CONFIGURE) {
+            ESLOG("MENU_ID_GLOBAL_CONFIGURE handler (macOS no-Qt path)");
+            std::string ini = getConfigFilePath();
+            char tip[1024];
+            snprintf(tip, sizeof(tip),
+                "EarShield: opening config file in default editor.\n"
+                "Edit values, save, then restart TeamSpeak.\n"
+                "Path: %s", ini.c_str());
+            ts3Functions.printMessageToCurrentTab(tip);
+            std::string cmd = "open '" + ini + "'";
+            (void)system(cmd.c_str());
+            return;
+        }
+#endif
         return;
     }
 
@@ -590,6 +640,25 @@ void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuType type, int menuI
             return;
         }
 
+#ifndef EARSHIELD_HAVE_QT
+        if (menuItemID == MENU_ID_CLIENT_CONFIGURE) {
+            // macOS: no Qt UI. Direct user to edit EarShield.ini for client overrides.
+            std::string uuid = getClientUUID(schid, clientID);
+            char tip[1024];
+            snprintf(tip, sizeof(tip),
+                "EarShield: per-client overrides on macOS via EarShield.ini.\n"
+                "Client UUID: %s\n"
+                "Add lines:\n"
+                "  limiter_%s=-15\n"
+                "  normlvl_%s=10\n"
+                "  norm_%s=1\n"
+                "Then restart TeamSpeak.",
+                uuid.c_str(), uuid.c_str(), uuid.c_str(), uuid.c_str());
+            ts3Functions.printMessageToCurrentTab(tip);
+            if (clientName) ts3Functions.freeMemory(clientName);
+            return;
+        }
+#else
         if (menuItemID == MENU_ID_CLIENT_CONFIGURE) {
             float initLim       = clientLimiterDBs.count(clientID)         ? clientLimiterDBs[clientID]         : limiterDB;
             float initNormLvl   = clientNormLevelDBs.count(clientID)       ? clientNormLevelDBs[clientID]       : normLevelDB;
@@ -689,6 +758,7 @@ void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuType type, int menuI
             ESLOG("client dialog show() returned");
             return;
         }
+#endif
     }
 
     } catch (const std::exception& e) {

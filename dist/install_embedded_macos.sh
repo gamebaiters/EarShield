@@ -41,30 +41,57 @@ fi
 /usr/bin/osascript -e 'tell application "TeamSpeak 3" to quit' >/dev/null 2>&1 || true
 sleep 1
 
-# Remove every previous EarShield + Volume Leveler binary variant.
-rm -f "$PLUGIN_DIR/libearshield_mac.dylib" \
-      "$PLUGIN_DIR/earshield_mac.dylib" \
-      "$PLUGIN_DIR/libearshield.dylib" \
-      "$PLUGIN_DIR/libvolumeleveler_mac.dylib" 2>/dev/null || true
+# Scoped removal: only files we are about to overwrite + known legacy
+# variants. Other plugins (Soundboard, etc.) ship their own lib*.dylib
+# bundle in the same plugins/ folder, so we never wildcard-delete *.dylib.
+INCOMING_FILES=()
+while IFS= read -r f; do INCOMING_FILES+=("$(basename "$f")"); done < <(find "$TMP_DIR/plugins" -maxdepth 1 -type f -print)
 
-# Wipe every bundled dep .dylib from the prior install so we don't end
-# up with stale Qt + transitive libs alongside fresh ones.
-rm -f "$PLUGIN_DIR"/lib*.dylib 2>/dev/null || true
-rm -f "$PLUGIN_DIR"/Qt*.dylib  2>/dev/null || true
+# Always remove EarShield's own binary + every legacy filename we have
+# ever shipped under (so updates from older versions are clean).
+LEGACY=(
+    "libearshield_mac.dylib"
+    "earshield_mac.dylib"
+    "libearshield.dylib"
+    "libvolumeleveler_mac.dylib"
+    "libQt5Core.dylib"
+    "libQt5Gui.dylib"
+    "libQt5Network.dylib"
+    "libQt5Widgets.dylib"
+    "libglib-2.0.0.dylib"
+    "libgthread-2.0.0.dylib"
+    "libintl.8.dylib"
+    "libmd4c.0.dylib"
+    "libpcre2-16.0.dylib"
+    "libpcre2-8.0.dylib"
+    "libpng16.16.dylib"
+    "libzstd.1.dylib"
+)
+for f in "${LEGACY[@]}" "${INCOMING_FILES[@]}"; do
+    [ -n "$f" ] && rm -f "$PLUGIN_DIR/$f" 2>/dev/null
+done
 
-# Wipe stale Frameworks subdir from older v6.0.x layouts.
-rm -rf "$PLUGIN_DIR/Frameworks" 2>/dev/null || true
+# Wipe legacy v6.0.5 / v6.0.6 Frameworks/ subdir layout, but only the
+# Qt frameworks we used to ship there - not the whole subdir, in case
+# another plugin uses a Frameworks/ folder for something else.
+for q in Core Gui Network Widgets DBus PrintSupport; do
+    rm -rf "$PLUGIN_DIR/Frameworks/Qt${q}.framework" 2>/dev/null || true
+done
+[ -d "$PLUGIN_DIR/Frameworks" ] && rmdir "$PLUGIN_DIR/Frameworks" 2>/dev/null || true
 
 cp -R "$TMP_DIR/plugins/." "$PLUGIN_DIR/"
 
-# Clear every extended attribute (quarantine, provenance, etc.) on the
-# whole plugin folder so Gatekeeper does not block dlopen on dylibs
-# downloaded via the browser.
-xattr -cr "$PLUGIN_DIR" >/dev/null 2>&1 || true
+# Clear extended attributes only on the files we just dropped, never on
+# the whole plugin folder (would touch other plugins' files too).
+for f in "${INCOMING_FILES[@]}"; do
+    [ -f "$PLUGIN_DIR/$f" ] && xattr -c "$PLUGIN_DIR/$f" >/dev/null 2>&1 || true
+done
 
-# Re-sign each Mach-O ad-hoc so Gatekeeper has a fresh, locally-
-# attached signature on every binary the plugin will dlopen.
-find "$PLUGIN_DIR" -maxdepth 1 -name '*.dylib' -print0 2>/dev/null | \
-    xargs -0 -I {} codesign --force -s - {} >/dev/null 2>&1 || true
+# Re-sign every Mach-O we just installed ad-hoc so Gatekeeper has a
+# fresh local signature. Restricted to incoming files.
+for f in "${INCOMING_FILES[@]}"; do
+    [[ "$f" == *.dylib ]] || continue
+    codesign --force -s - "$PLUGIN_DIR/$f" >/dev/null 2>&1 || true
+done
 
 echo "$PLUGIN_DIR"

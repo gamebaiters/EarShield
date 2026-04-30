@@ -3,9 +3,6 @@ project(EarShield CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_AUTOMOC ON)
-
-find_package(Qt5 5.12 COMPONENTS Core Widgets Gui Network REQUIRED)
 
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -18,17 +15,34 @@ if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-set(EARSHIELD_SOURCES
-    src/plugin.cpp
-    src/UpdateChecker.cpp
-    src/UpdateChecker.h
-    src/updater_qt.cpp
-    src/updater_qt.h
-    src/debug_log.cpp
-    src/debug_log.h
-    src/version.h
-    src/plugin.h
-)
+# macOS: TeamSpeak 3 Client statically links Qt without exporting symbols, so
+# loading a second copy of Qt into the process triggers qFatal as soon as
+# QWidget construction sees a NULL QApplication::instance() in our private
+# Qt's static state. Build the macOS plugin Qt-free: drop UI dialogs +
+# Qt-based auto-updater. Audio processing is identical across platforms.
+if(APPLE)
+    set(EARSHIELD_SOURCES
+        src/plugin.cpp
+        src/debug_log.cpp
+        src/debug_log.h
+        src/version.h
+        src/plugin.h
+    )
+else()
+    set(CMAKE_AUTOMOC ON)
+    find_package(Qt5 5.12 COMPONENTS Core Widgets Gui Network REQUIRED)
+    set(EARSHIELD_SOURCES
+        src/plugin.cpp
+        src/UpdateChecker.cpp
+        src/UpdateChecker.h
+        src/updater_qt.cpp
+        src/updater_qt.h
+        src/debug_log.cpp
+        src/debug_log.h
+        src/version.h
+        src/plugin.h
+    )
+endif()
 
 if(WIN32)
     set(EARSHIELD_TARGET EarShield_win64)
@@ -49,12 +63,10 @@ if(WIN32)
     set_target_properties(${EARSHIELD_TARGET} PROPERTIES PREFIX "")
 endif()
 
-target_link_libraries(${EARSHIELD_TARGET} PRIVATE
-    Qt5::Core Qt5::Widgets Qt5::Gui Qt5::Network
-)
-
 if(APPLE)
-    set_target_properties(${EARSHIELD_TARGET} PROPERTIES
-        SUFFIX ".dylib"
+    set_target_properties(${EARSHIELD_TARGET} PROPERTIES SUFFIX ".dylib")
+else()
+    target_link_libraries(${EARSHIELD_TARGET} PRIVATE
+        Qt5::Core Qt5::Widgets Qt5::Gui Qt5::Network
     )
 endif()

@@ -83,69 +83,37 @@ jobs:
 
   # ---------------- macOS x86_64 ----------------
   # Self-hosted runner on a personal Apple Silicon Mac. TS3 on macOS is
-  # x86_64-only, so we link against x86_64 Qt5 from an Intel Homebrew tree
-  # at /usr/local invoked through Rosetta 2.
+  # x86_64-only, so we build the plugin with -arch x86_64.
   #
-  # ONE-TIME SETUP REQUIRED ON THE MAC (cannot run from CI - needs sudo):
-  #   1. sudo softwareupdate --install-rosetta --agree-to-license
-  #   2. xcode-select --install                     # if not already
-  #   3. arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  #   4. arch -x86_64 /usr/local/bin/brew install qt@5
+  # The macOS plugin is intentionally Qt-free (see CMakeLists APPLE branch
+  # + #ifndef EARSHIELD_HAVE_QT in plugin.cpp). TS3 statically links Qt
+  # without exporting symbols, so a second Qt loaded into the process
+  # crashes the host on first QWidget construction. The macOS plugin
+  # therefore has no UI dialogs and no Qt-based auto-updater. Audio
+  # processing is identical across platforms.
   build-macos:
     runs-on: self-hosted
-    env:
-      INTEL_BREW: /usr/local/bin/brew
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify Rosetta + Intel Homebrew prerequisites
+      - name: Verify Rosetta available
         run: |
           if ! arch -x86_64 /usr/bin/uname -m >/dev/null 2>&1; then
-              cat <<'EOF' >&2
-          ERROR: Rosetta 2 is not installed on this runner.
-          Run ONCE on the Mac (interactive sudo, can't run from CI):
-              sudo softwareupdate --install-rosetta --agree-to-license
-          EOF
+              echo "ERROR: Rosetta 2 not installed. sudo softwareupdate --install-rosetta --agree-to-license" >&2
               exit 1
           fi
           arch -x86_64 /usr/bin/uname -m
-          if [ ! -x "$INTEL_BREW" ]; then
-              cat <<'EOF' >&2
-          ERROR: Intel Homebrew is not installed at /usr/local.
-          Run ONCE on the Mac (interactive sudo, can't run from CI):
-              arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-              arch -x86_64 /usr/local/bin/brew install qt@5
-          EOF
-              exit 1
-          fi
-          arch -x86_64 "$INTEL_BREW" --version
 
-      - name: Update Qt5 via Intel Homebrew (no sudo)
-        run: |
-          arch -x86_64 "$INTEL_BREW" update || true
-          arch -x86_64 "$INTEL_BREW" install qt@5 2>&1 | tail -20 || true
-          arch -x86_64 "$INTEL_BREW" upgrade qt@5 2>&1 | tail -20 || true
-          echo "/usr/local/opt/qt@5/bin" >> "$GITHUB_PATH"
-
-      - name: Sanity-check arch of dependencies
-        run: |
-          file /usr/local/opt/qt@5/lib/QtCore.framework/QtCore | tee /tmp/arch.log
-          if grep -E "arm64" /tmp/arch.log; then
-              echo "Dependencies are arm64 - link will fail. Aborting." >&2
-              exit 1
-          fi
-
-      - name: Configure (x86_64)
+      - name: Configure (x86_64, Qt-free)
         run: |
           cmake -B build \
               -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
-              -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-              -DCMAKE_PREFIX_PATH=/usr/local/opt/qt@5
+              -DCMAKE_OSX_ARCHITECTURES=x86_64
 
       - name: Build
         run: cmake --build build -j"$(sysctl -n hw.ncpu)"
 
-      - name: Stage macOS artifact (flat dylibs, recursive deps)
+      - name: Stage macOS artifact (Qt-free, single dylib)
         run: |
           set -e
           mkdir -p stage/plugins
@@ -153,129 +121,21 @@ jobs:
           [ -z "$DYLIB" ] && { echo "dylib not found"; ls -la build; exit 1; }
           cp "$DYLIB" stage/plugins/libearshield_mac.dylib
           chmod u+w stage/plugins/libearshield_mac.dylib
+          strip -x stage/plugins/libearshield_mac.dylib 2>/dev/null || true
 
-          QT_PREFIX="$(/usr/local/bin/brew --prefix qt@5)"
-          QT_FWS="Core Gui Network Widgets"
-
-          # TS3's macOS .ts3_plugin installer flattens any subdir under
-          # plugins/, so framework directories are dropped entirely.
-          # Workaround: extract each Qt framework's binary as a plain
-          # dylib at plugins/<libQt5X.dylib>. Same pattern soundboard
-          # uses for FFmpeg. TS3 will try to load each as a plugin and
-          # log a harmless "Required plugin function not found" warning.
-          for q in $QT_FWS; do
-              SRC="${QT_PREFIX}/lib/Qt${q}.framework/Versions/5/Qt${q}"
-              [ ! -f "$SRC" ] && { echo "missing Qt$q binary"; exit 1; }
-              DST="stage/plugins/libQt5${q}.dylib"
-              cp "$SRC" "$DST"
-              chmod u+w "$DST"
-              install_name_tool -id "@rpath/libQt5${q}.dylib" "$DST"
-          done
-
-          # Plugin dylib rpath: @loader_path so it finds bundled dylibs
-          # next to itself in plugins/.
-          install_name_tool -add_rpath "@loader_path" stage/plugins/libearshield_mac.dylib 2>/dev/null || true
-
-          # Recursive dep bundler. Walks every bundled binary, finds each
-          # /usr/local/* dependency, rewrites the reference to @rpath:
-          #   - Qt framework deps  -> @rpath/libQt5<X>.dylib
-          #   - plain dylibs       -> @rpath/<basename>; copy flat into
-          #                          plugins/ and id-stamp them too.
-          # Iterates until a full pass produces zero changes or 8 rounds.
-          rewrite_pass() {
-              local CHANGED=0
-              local TARGETS=()
-              for f in stage/plugins/libearshield_mac.dylib stage/plugins/lib*.dylib; do
-                  [ -f "$f" ] && TARGETS+=("$f")
-              done
-              local BIN
-              for BIN in "${TARGETS[@]}"; do
-                  [ -f "$BIN" ] || continue
-                  chmod u+w "$BIN"
-                  while IFS= read -r DEP; do
-                      [ -z "$DEP" ] && continue
-                      local BASE NEW TARGET SHORT
-                      if [[ "$DEP" == *.framework/Versions/* ]]; then
-                          # /usr/local/Cellar/qt@5/X/lib/QtCore.framework/Versions/5/QtCore -> QtCore
-                          BASE="$(basename "$DEP")"
-                          # Strip leading Qt to avoid libQt5QtCore.dylib (double Qt).
-                          # We bundle these as plain dylibs named libQt5<short>.dylib.
-                          SHORT="${BASE#Qt}"
-                          NEW="@rpath/libQt5${SHORT}.dylib"
-                      else
-                          BASE="$(basename "$DEP")"
-                          NEW="@rpath/${BASE}"
-                          TARGET="stage/plugins/${BASE}"
-                          if [ ! -f "$TARGET" ]; then
-                              cp "$DEP" "$TARGET"
-                              chmod u+w "$TARGET"
-                              install_name_tool -id "@rpath/${BASE}" "$TARGET" 2>/dev/null || true
-                              echo "+bundled: $BASE (from $DEP)"
-                              CHANGED=1
-                          fi
-                      fi
-                      if install_name_tool -change "$DEP" "$NEW" "$BIN" 2>/dev/null; then
-                          CHANGED=1
-                          echo "rewrite($BIN): $DEP -> $NEW"
-                      fi
-                  done < <(otool -L "$BIN" | awk '/^\t\/usr\/local\// {print $1}' | sort -u)
-              done
-              return $CHANGED
-          }
-
-          for round in 1 2 3 4 5 6 7 8; do
-              echo "===== rewrite round $round ====="
-              rewrite_pass || true
-              REMAIN=$(find stage/plugins -maxdepth 1 -name '*.dylib' -exec otool -L {} \; 2>/dev/null | grep -c '^[[:space:]]*/usr/local/' || true)
-              echo "remaining /usr/local/ refs: $REMAIN"
-              [ "$REMAIN" = "0" ] && break
-          done
-
-          # Strip symbol tables
-          for BIN in stage/plugins/*.dylib; do
-              [ -f "$BIN" ] && strip -x "$BIN" 2>/dev/null || true
-          done
-
-          BAD=$(find stage/plugins -maxdepth 1 -name '*.dylib' -exec otool -L {} \; 2>/dev/null | grep '/usr/local/' || true)
+          BAD=$(otool -L stage/plugins/libearshield_mac.dylib | grep '/usr/local/' || true)
           if [ -n "$BAD" ]; then
-              echo "ERROR: stage still has /usr/local/* references:"
+              echo "ERROR: macOS dylib has unexpected /usr/local/* refs:"
               echo "$BAD"
               exit 1
           fi
 
-          # Sanity: every @rpath/<name> reference in every binary must
-          # resolve to an actual file in stage/plugins/. Catches install
-          # name typos (e.g. libQt5QtCore.dylib double-Qt regression).
-          MISSING_FILE="$(mktemp)"
-          for BIN in stage/plugins/*.dylib; do
-              [ -f "$BIN" ] || continue
-              while IFS= read -r REF; do
-                  [ -z "$REF" ] && continue
-                  TARGET="${REF#@rpath/}"
-                  if [ "$TARGET" = "$(basename "$BIN")" ]; then continue; fi
-                  if [ ! -f "stage/plugins/${TARGET}" ]; then
-                      echo "  $(basename "$BIN") -> $REF" >> "$MISSING_FILE"
-                  fi
-              done < <(otool -L "$BIN" | awk '/^\t@rpath\// {print $1}' | sort -u)
-          done
-          if [ -s "$MISSING_FILE" ]; then
-              echo "ERROR: dangling @rpath references in bundle:"
-              cat "$MISSING_FILE"
-              echo "--- present files ---"
-              ls stage/plugins/
-              exit 1
-          fi
-          rm -f "$MISSING_FILE"
+          codesign --force -s - stage/plugins/libearshield_mac.dylib 2>/dev/null || true
 
-          # Ad-hoc codesign every dylib so Gatekeeper does not block dlopen
-          for BIN in stage/plugins/*.dylib; do
-              codesign --force -s - "$BIN" 2>/dev/null || true
-          done
-
-          echo "--- final flat layout ---"
+          echo "--- final layout ---"
           ls -la stage/plugins/
           du -sh stage/plugins
-          echo "--- plugin dylib otool ---"
+          echo "--- otool ---"
           otool -L stage/plugins/libearshield_mac.dylib
 
       - name: Build macOS-only .ts3_plugin (input for the .app installer)
