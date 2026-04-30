@@ -1,3 +1,18 @@
+EarShield 6.0.8
+================
+
+* Debug log facility added. Plugin writes a timestamped log to
+    Windows: %APPDATA%\TS3Client\plugins\EarShield_debug.log
+    Linux:   ~/.ts3client/plugins/EarShield_debug.log
+    macOS:   ~/Library/Application Support/TeamSpeak 3/plugins/EarShield_debug.log
+  every line is flushed immediately so it survives even hard crashes.
+* Crash handlers: SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE plus
+  std::set_terminate are wired to dump a backtrace and the message
+  before propagating, so the next macOS crash on Settings or Check
+  for Updates leaves a usable trace in the log.
+* Menu handlers + UpdateChecker calls + all dialog ctors and
+  show()/exec() are wrapped with try/catch + entry/exit logging.
+
 EarShield 6.0.7
 ================
 

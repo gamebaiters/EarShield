@@ -48,6 +48,7 @@
 #include "plugin.h"
 #include "version.h"
 #include "UpdateChecker.h"
+#include "debug_log.h"
 
 static struct TS3Functions ts3Functions;
 
@@ -244,25 +245,60 @@ static void sweepLegacyVariants() {
 #endif
 
 int ts3plugin_init() {
+    char path[PATH_BUFSIZE] = {0};
+    if (ts3Functions.getConfigPath) ts3Functions.getConfigPath(path, PATH_BUFSIZE);
+    earshield_log::init(path);
+    earshield_log::install_crash_handlers();
+    ESLOG("ts3plugin_init begin (version %s build %d, api %d)",
+        EARSHIELD_VERSION_STRING, EARSHIELD_VERSION_BUILD, PLUGIN_API_VERSION);
+    ESLOG("QCoreApplication::instance() = %p", (void*)QCoreApplication::instance());
+
     loadConfig();
+    ESLOG("config loaded: enabled=%d normalize=%d limiterDB=%.1f normLevelDB=%.1f lang=%s",
+        (int)pluginEnabled, (int)globalNormalize, limiterDB, normLevelDB, langCode.c_str());
+
 #ifdef _WIN32
     sweepLegacyVariants();
+    ESLOG("legacy DLL sweep done");
 #endif
 
     if (QCoreApplication::instance()) {
-        if (!g_updater) g_updater = new UpdateChecker();
-        QTimer::singleShot(3500, g_updater.data(), [](){ if (g_updater) g_updater->checkForUpdates(true); });
+        ESLOG("scheduling UpdateChecker creation in 3500ms");
+        QTimer::singleShot(3500, []() {
+            ESLOG("UpdateChecker timer fired");
+            try {
+                if (!g_updater) {
+                    ESLOG("constructing UpdateChecker");
+                    g_updater = new UpdateChecker();
+                    ESLOG("UpdateChecker constructed: %p", (void*)g_updater.data());
+                }
+                if (g_updater) {
+                    ESLOG("calling checkForUpdates(silent=true)");
+                    g_updater->checkForUpdates(true);
+                }
+            } catch (const std::exception& e) {
+                ESLOG("[EXCEPTION] in init updater: %s", e.what());
+            } catch (...) {
+                ESLOG("[EXCEPTION] in init updater: unknown");
+            }
+        });
+    } else {
+        ESLOG("[WARN] QCoreApplication::instance() is null at init - skipping update check");
     }
+    ESLOG("ts3plugin_init end");
     return 0;
 }
 
 static void plugin_kill() {
+    ESLOG("plugin_kill begin");
     if (g_updater) {
+        ESLOG("deleting UpdateChecker %p", (void*)g_updater.data());
         delete g_updater.data();
         g_updater = nullptr;
     }
 
     if (QCoreApplication::instance()) {
+        ESLOG("draining Qt event queue");
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         QCoreApplication::processEvents(QEventLoop::AllEvents, 200);
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
@@ -273,12 +309,16 @@ static void plugin_kill() {
     clientLimiterDBs.clear();
     clientNormLevelDBs.clear();
     clientNormalizeOverrides.clear();
+    ESLOG("plugin_kill end");
 }
 
 void ts3plugin_shutdown() {
+    ESLOG("ts3plugin_shutdown begin");
     saveConfig();
     plugin_kill();
     if (pluginID) { free(pluginID); pluginID = nullptr; }
+    ESLOG("ts3plugin_shutdown end");
+    earshield_log::close();
 }
 
 int ts3plugin_offersConfigure() { return PLUGIN_OFFERS_NO_CONFIGURE; }
@@ -378,6 +418,12 @@ static void resetAllSettings() {
 
 void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuType type, int menuItemID, uint64 selectedItemID) {
     char msg[256];
+    ESLOG("onMenuItemEvent type=%d id=%d schid=%llu selected=%llu",
+        (int)type, menuItemID, (unsigned long long)schid, (unsigned long long)selectedItemID);
+    ESLOG("  thread=main? QApplication=%p QCoreApp=%p",
+        (void*)QCoreApplication::instance(), (void*)QCoreApplication::instance());
+
+    try {
 
     if (type == PLUGIN_MENU_TYPE_GLOBAL) {
         if (menuItemID == MENU_ID_GLOBAL_TOGGLE) {
@@ -397,13 +443,22 @@ void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuType type, int menuI
         }
 
         if (menuItemID == MENU_ID_GLOBAL_CHECK_UPDATE) {
-            if (!g_updater) g_updater = new UpdateChecker();
+            ESLOG("MENU_ID_GLOBAL_CHECK_UPDATE handler");
+            if (!g_updater) {
+                ESLOG("creating UpdateChecker on demand");
+                g_updater = new UpdateChecker();
+                ESLOG("UpdateChecker = %p", (void*)g_updater.data());
+            }
+            ESLOG("calling checkForUpdates(silent=false)");
             g_updater->checkForUpdates(false);
+            ESLOG("checkForUpdates returned");
             return;
         }
 
         if (menuItemID == MENU_ID_GLOBAL_CONFIGURE) {
+            ESLOG("MENU_ID_GLOBAL_CONFIGURE handler - constructing global dialog");
             QDialog* dlg = new QDialog();
+            ESLOG("global QDialog ctor ok = %p", (void*)dlg);
             dlg->setWindowTitle(isItalian() ? "Impostazioni Globali EarShield" : "EarShield Global Settings");
             dlg->resize(440, 480);
             QVBoxLayout* mainLayout = new QVBoxLayout(dlg);
@@ -497,7 +552,9 @@ void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuType type, int menuI
             mainLayout->addLayout(btnLayout);
 
             dlg->setAttribute(Qt::WA_DeleteOnClose);
+            ESLOG("global dialog about to show()");
             dlg->show();
+            ESLOG("global dialog show() returned");
             return;
         }
         return;
@@ -627,9 +684,17 @@ void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuType type, int menuI
 
             if (clientName) ts3Functions.freeMemory(clientName);
             dlg->setAttribute(Qt::WA_DeleteOnClose);
+            ESLOG("client dialog about to show()");
             dlg->show();
+            ESLOG("client dialog show() returned");
             return;
         }
+    }
+
+    } catch (const std::exception& e) {
+        ESLOG("[EXCEPTION] onMenuItemEvent: %s", e.what());
+    } catch (...) {
+        ESLOG("[EXCEPTION] onMenuItemEvent: unknown");
     }
 }
 

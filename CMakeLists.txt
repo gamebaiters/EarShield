@@ -24,6 +24,8 @@ set(EARSHIELD_SOURCES
     src/UpdateChecker.h
     src/updater_qt.cpp
     src/updater_qt.h
+    src/debug_log.cpp
+    src/debug_log.h
     src/version.h
     src/plugin.h
 )

@@ -1,6 +1,7 @@
 #include "UpdateChecker.h"
 #include "version.h"
 #include "updater_qt.h"
+#include "debug_log.h"
 
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
@@ -20,13 +21,17 @@ UpdateChecker::UpdateChecker(QObject* parent)
     , m_silentIfNone(true)
     , m_inFlight(false)
 {
+    ESLOG("UpdateChecker ctor: this=%p net=%p", (void*)this, (void*)m_net);
     connect(m_net, &QNetworkAccessManager::finished, this, &UpdateChecker::onFeedFinished);
 }
 
-UpdateChecker::~UpdateChecker() = default;
+UpdateChecker::~UpdateChecker() {
+    ESLOG("UpdateChecker dtor: this=%p", (void*)this);
+}
 
 void UpdateChecker::checkForUpdates(bool silentIfNone)
 {
+    ESLOG("checkForUpdates(silent=%d) inFlight=%d", (int)silentIfNone, (int)m_inFlight);
     if (m_inFlight) return;
     m_silentIfNone = silentIfNone;
     m_inFlight = true;
@@ -34,11 +39,17 @@ void UpdateChecker::checkForUpdates(bool silentIfNone)
     QNetworkRequest req{QUrl(QStringLiteral(EARSHIELD_FEED_URL))};
     req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("EarShield/%1").arg(EARSHIELD_VERSION_STRING));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    ESLOG("issuing GET %s", EARSHIELD_FEED_URL);
     m_net->get(req);
+    ESLOG("GET issued");
 }
 
 void UpdateChecker::onFeedFinished(QNetworkReply* reply)
 {
+    ESLOG("onFeedFinished: error=%d (%s) bytes=%lld",
+        (int)reply->error(),
+        reply->errorString().toUtf8().constData(),
+        (long long)reply->bytesAvailable());
     m_inFlight = false;
     reply->deleteLater();
 
@@ -74,14 +85,24 @@ void UpdateChecker::onFeedFinished(QNetworkReply* reply)
     }
 
     if (latestBuild <= EARSHIELD_VERSION_BUILD) {
+        ESLOG("already up to date (installed=%d latest=%d) silent=%d",
+            EARSHIELD_VERSION_BUILD, latestBuild, (int)m_silentIfNone);
         if (!m_silentIfNone) {
+            ESLOG("about to show 'up to date' QMessageBox");
             QMessageBox::information(nullptr, QStringLiteral("EarShield"),
                 QStringLiteral("EarShield %1 is up to date.").arg(EARSHIELD_VERSION_STRING));
+            ESLOG("'up to date' QMessageBox returned");
         }
         return;
     }
 
+    ESLOG("update available: latestBuild=%d latestStr=%s url=%s",
+        latestBuild,
+        latestStr.toUtf8().constData(),
+        downloadUrl.toUtf8().constData());
+
     QMessageBox box;
+    ESLOG("QMessageBox ctor ok");
     box.setIcon(QMessageBox::Information);
     box.setWindowTitle(QStringLiteral("EarShield update available"));
     box.setText(QStringLiteral("A new version of EarShield is available.\n\nInstalled: %1\nLatest: %2")
@@ -108,8 +129,12 @@ void UpdateChecker::onFeedFinished(QNetworkReply* reply)
         });
     }
 
+    ESLOG("box.exec() about to call");
     box.exec();
+    ESLOG("box.exec() returned, clicked=%p update=%p", (void*)box.clickedButton(), (void*)updateBtn);
     if (box.clickedButton() != updateBtn) return;
 
+    ESLOG("calling UpdaterQt::downloadAndInstall");
     UpdaterQt::downloadAndInstall(downloadUrl);
+    ESLOG("downloadAndInstall returned");
 }
