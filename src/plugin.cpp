@@ -268,7 +268,11 @@ int ts3plugin_init() {
     earshield_log::install_crash_handlers();
     ESLOG("ts3plugin_init begin (version %s build %d, api %d)",
         EARSHIELD_VERSION_STRING, EARSHIELD_VERSION_BUILD, PLUGIN_API_VERSION);
+#ifdef EARSHIELD_HAVE_QT
     ESLOG("QCoreApplication::instance() = %p", (void*)QCoreApplication::instance());
+#else
+    ESLOG("macOS Qt-free build");
+#endif
 
     loadConfig();
     ESLOG("config loaded: enabled=%d normalize=%d limiterDB=%.1f normLevelDB=%.1f lang=%s",
